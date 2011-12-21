@@ -1,0 +1,287 @@
+import feature : feature ;
+import toolset : flags ;
+import type ;
+import common ;
+import generators ;
+import path : basename ;
+import property-set ;
+import errors ;
+import "class" : new ;
+
+if [ MATCH (--debug-configuration) : [ modules.peek : ARGV ] ]
+{
+    .debug-configuration = true ;
+}
+
+feature.extend toolset : avr ;
+
+import gcc ;
+
+toolset.inherit-generators avr : gcc : gcc.prebuilt gcc.searched-lib-generator gcc.link  ;
+toolset.inherit-rules avr : gcc ;
+toolset.inherit-flags avr : gcc ;
+
+type.set-generated-target-suffix EXE : <toolset>avr : elf ;
+type.register-suffixes elf : EXE ;
+type.register HEX  : hex ;
+type.register EEP  : eep ;
+type.register MAP  : map ;
+
+# feature to define the avr select microcontroller variant
+feature.subfeature toolset avr : mcu  : 
+  avr1 avr2 avr25 avr3 avr31 avr35 avr4 avr5 avr51 avr6 avrxmega1
+  avrxmega2 avrxmega3 avrxmega4 avrxmega5 avrxmega6 avrxmega7 at90s1200
+  attiny11 attiny12 attiny15 attiny28 at90s2313 at90s2323 at90s2333
+  at90s2343 attiny22 attiny26 at90s4414 at90s4433 at90s4434 at90s8515
+  at90c8534 at90s8535 ata6289 attiny13 attiny13a attiny2313 attiny2313a
+  attiny24 attiny24a attiny4313 attiny44 attiny44a attiny84 attiny25
+  attiny45 attiny85 attiny261 attiny261a attiny461 attiny461a attiny861
+  attiny861a attiny87 attiny43u attiny48 attiny88 at86rf401 at43usb355
+  at76c711 atmega103 at43usb320 attiny167 at90usb82 at90usb162 atmega8u2
+  atmega16u2 atmega32u2 atmega8 atmega48 atmega48a atmega48p atmega88
+  atmega88a atmega88p atmega88pa atmega8515 atmega8535 atmega8hva
+  atmega4hvd atmega8hvd at90pwm1 at90pwm2 at90pwm2b at90pwm3 at90pwm3b
+  at90pwm81 atmega16 atmega16a atmega161 atmega162 atmega163 atmega164a
+  atmega164p atmega165 atmega165a atmega165p atmega168 atmega168a
+  atmega168p atmega169 atmega169a atmega169p atmega169pa atmega16hva
+  atmega16hvb atmega32 atmega323 atmega324a atmega324p atmega324pa
+  atmega325 atmega325p atmega3250 atmega3250p atmega328 atmega328p
+  atmega329 atmega329p atmega329pa atmega3290 atmega3290p atmega32hvb
+  atmega406 atmega64 atmega640 atmega644 atmega644a atmega644p atmega644pa
+  atmega645 atmega645a atmega645p atmega649 atmega649a atmega649p
+  atmega6450 atmega6450a atmega6450p atmega6490 atmega6490a atmega6490p
+  atmega64hve atmega16hva atmega16hva2 at90can32 at90can64 at90pwm216
+  at90pwm316 atmega16m1 atmega16u4 atmega32c1 atmega32m1 atmega32u4
+  atmega32u6 atmega64c1 atmega64m1 at90usb646 at90usb647 at90scr100 at94k
+  atmega128 atmega1280 atmega1281 atmega1284p atmega128rfa1 at90can128
+  at90usb1286 at90usb1287 m3000f m3000s m3001b atmega2560 atmega2561
+  atxmega16a4 atxmega16d4 atxmega32d4 atxmega32a4 atxmega64a3 atxmega64d3
+  atxmega64a1 atxmega128a3 atxmega128d3 atxmega192a3 atxmega192d3
+  atxmega256a3 atxmega256a3b atxmega256d3 atxmega128a1 : 
+  propagated symmetric ;
+
+# feature to define the used frequency of the microcontroller
+feature.subfeature toolset avr : cpufrequency :             : free ;
+
+
+# pass the feature values as flags to the compile an link rules	
+toolset.flags avr MCU <toolset-avr:mcu> ;
+toolset.flags avr.compile CPU_FREQUENCY <toolset-avr:cpufrequency> ;
+
+toolset.flags avr.compile OPTIONS : -fpack-struct -fshort-enums -ffunction-sections -fdata-sections ; 
+toolset.flags avr.link OPTIONS : -Wl,--gc-sections ;
+
+rule init ( version ? : command * : options * : requirement * )
+{
+	#1): use user-provided command
+    local tool-command = ;
+    if $(command)
+    {
+       tool-command  =  [ common.get-invocation-command-nodefault avr : avr-g++ : $(command) ] ;
+       if ! $(tool-command)
+       {
+           errors.error "toolset avr initialization:" :
+                        "provided command '$(command)' not found" :
+                        "initialized from" [ errors.nearest-user-location ] ;
+       }
+    }
+    #2): enforce user-provided version
+    else if $(version)
+    {
+        tool-command  =  [ common.get-invocation-command-nodefault avr : "avr-g++-$(version[1])" ] ;
+        
+        #2.1) fallback: check whether "avr-g++" reports the requested version
+        if ! $(tool-command)
+        {
+            tool-command = [ common.get-invocation-command-nodefault avr : avr-g++ ] ;
+            if $(tool-command)
+            {
+                local tool-command-string = $(tool-command:J=" ") ;
+                local tool-version = [ MATCH "^([0-9.]+)" : [ SHELL "$(tool-command-string) -dumpversion" ] ] ;
+                if $(tool-version) != $(version)
+                {
+                    # Permit a match betwen two-digit version specified by the user
+                    # (e.g. 4.4) and 3-digit version reported by gcc.
+                    # Since only two digits are present in binary name anyway,
+                    # insisting that user specify 3-digit version when
+                    # configuring Boost.Build while it's not required on 
+                    # command like would be strange.
+                    local stripped = [ MATCH "^([0-9]+\.[0-9]+).*" : $(tool-version) ] ;
+                    if $(stripped) != $(version)
+                    {                                            
+                        errors.error "toolset avr initialization:" :
+                          "version '$(version)' requested but 'avr-g++-$(version)' not found and version '$(tool-version)' of default '$(tool-command)' does not match" :
+                            "initialized from" [ errors.nearest-user-location ] ;
+                        tool-command = ;
+                    }
+                    # Use full 3-digit version to be compatible with the 'using gcc ;' case
+                    version = $(tool-version) ;
+                }
+            }
+            else
+            {
+                errors.error "toolset avr initialization:" :
+                             "version '$(version)' requested but neither 'avr-g++-$(version)' nor default 'avr-g++' found" :
+                             "initialized from" [ errors.nearest-user-location ] ;
+            }
+        }
+    }
+    #3) default: no command and no version specified, try using default command "avr-g++"
+    else
+    {
+        tool-command = [ common.get-invocation-command-nodefault avr : avr-g++ ] ;
+        if ! $(tool-command)
+        {
+            errors.error "toolset avr initialization:" :
+                         "no command provided, default command 'avr-g++' not found" :
+                         "initialized from" [ errors.nearest-user-location ] ;
+        }
+    }
+    
+    # Information about the avr command...
+    #   The command.
+    local command = $(tool-command) ;
+    #   The root directory of the tool install.
+    local root = [ feature.get-values <root> : $(options) ] ;
+    #   The bin directory where to find the command to execute.
+    local bin ;
+    #   The flavor of compiler.
+    local flavor = [ feature.get-values <flavor> : $(options) ] ;
+    #   Autodetect the root and bin dir if not given.
+    if $(command)
+    {
+        bin ?= [ common.get-absolute-tool-path $(command[-1]) ] ;
+        root ?= $(bin:D) ;
+    }
+    # The 'command' variable can have multiple elements. When calling
+    # the SHELL builtin we need a single string.
+    local command-string = $(command:J=" ") ;
+    #   Autodetect the version and flavor if not given.
+    if $(command)
+    {    
+        local machine = [ MATCH "^([^ ]+)"
+            : [ SHELL "$(command-string) -dumpmachine" ] ] ;
+        version ?= [ MATCH "^([0-9.]+)"
+            : [ SHELL "$(command-string) -dumpversion" ] ] ;
+        switch $(machine:L)
+        {
+            case *mingw* : flavor ?= mingw ;
+        }
+    }
+
+    local condition ;
+    if $(flavor)
+    {
+        condition = [ common.check-init-parameters avr
+            : version $(version)
+            : flavor $(flavor)
+            ] ;
+    }
+    else
+    {
+        condition = [ common.check-init-parameters avr
+            : version $(version)
+            ] ;
+        condition = $(condition) ;  #/<toolset-avr:flavor> ;
+    }
+
+    common.handle-options avr : $(condition) : $(command) : $(options) ;
+
+    local linker = [ feature.get-values <linker-type> : $(options) ] ;
+    # The logic below should actually be keyed on <target-os>
+    if ! $(linker)
+    {
+    	linker = gnu ;
+    }
+    gcc.init-link-flags avr $(linker) $(condition) ;
+
+
+    # If it's not a system avr install we should adjust the various programs as
+    # needed to prefer using the install specific versions. This is essential
+    # for correct use of MinGW and for cross-compiling.
+    
+    local nl = "
+" ;
+
+
+    # - objcopy.
+    local objcopy = [ common.get-invocation-command avr
+            : [ NORMALIZE_PATH [ MATCH "(.*)[$(nl)]+" : [ SHELL "$(command-string) -print-prog-name=objcopy" ] ] ]
+            : [ feature.get-values <objcopy> : $(options) ] 
+            : $(bin) 
+            : search-path ] ;
+    toolset.flags avr.link .OBJCOPY $(condition) : $(objcopy[1]) ;
+    if $(.debug-configuration)
+    {
+        ECHO notice: using avr objcopy :: $(condition) :: $(objcopy[1]) ;
+    }
+    
+     # - size.
+    local gcc = $(command-string:D)/avr-gcc ; 
+    toolset.flags avr.compile.c .GCC $(condition) : $(gcc) ;
+    if $(.debug-configuration)
+    {
+        ECHO notice: using avr size :: $(condition) :: $(gcc) ;
+    }
+    
+     # - size.
+    local size = $(command-string:D)/avr-size ; 
+    toolset.flags avr.link .SIZE $(condition) : $(size) ;
+    if $(.debug-configuration)
+    {
+        ECHO notice: using avr size :: $(condition) :: $(size) ;
+    }
+    
+    # - The archive builder.
+    local archiver = [ common.get-invocation-command avr
+            : [ NORMALIZE_PATH [ MATCH "(.*)[$(nl)]+" : [ SHELL "$(command-string) -print-prog-name=ar" ] ] ]
+            : [ feature.get-values <archiver> : $(options) ] 
+            : $(bin) 
+            : search-path ] ;
+    toolset.flags avr.archive .AR $(condition) : $(archiver[1]) ;
+    if $(.debug-configuration)
+    {
+        ECHO notice: using avr archiver :: $(condition) :: $(archiver[1]) ;
+    }
+
+    # - Ranlib
+    local ranlib = [ common.get-invocation-command avr
+            : [ NORMALIZE_PATH [ MATCH "(.*)[$(nl)]+" : [ SHELL "$(command-string) -print-prog-name=ranlib" ] ] ]
+            : [ feature.get-values <ranlib> : $(options) ] 
+            : $(bin) 
+            : search-path ] ;
+    toolset.flags avr.archive .RANLIB $(condition) : $(ranlib[1]) ;
+    if $(.debug-configuration)
+    {
+        ECHO notice: using avr ranlib :: $(condition) :: $(ranlib[1]) ;
+    }   
+}
+
+# -------------------------------------------------------------------------------------------------
+#  actions
+# -------------------------------------------------------------------------------------------------
+
+generators.register [ new gcc-linking-generator avr.link : LIB OBJ : EXE HEX EEP MAP : <toolset>avr ] ;
+
+# -------------------------------------------------------------------------------------------------
+#  actions
+# -------------------------------------------------------------------------------------------------
+
+actions compile.c++ bind PCH_FILE
+{
+	"$(CONFIG_COMMAND)" $(LANG) -ftemplate-depth-$(TEMPLATE_DEPTH) $(OPTIONS) -mmcu=$(MCU) -DF_CPU=$(CPU_FREQUENCY)UL -D$(DEFINES) -I"$(PCH_FILE:D)" -I"$(INCLUDES)" -c -o "$(<:W)" "$(>:W)"
+}
+
+actions compile.c bind PCH_FILE
+{
+	"$(.GCC)" $(LANG) $(OPTIONS) -mmcu=$(MCU) -DF_CPU=$(CPU_FREQUENCY)UL $(USER_OPTIONS) -D$(DEFINES) -I"$(PCH_FILE:D)" -I"$(INCLUDES)" -c -o "$(<)" "$(>)"
+}
+
+actions link bind LIBRARIES
+{
+	"$(CONFIG_COMMAND)" --cref -s -Os -o "$(<[1])" "$(>)" "$(LIBRARIES)" -l$(FINDLIBS-ST) -lm -Wl,-Map,$(<[4]),--cref -s -L"$(LINKPATH)"  $(OPTIONS)  $(USER_OPTIONS) -mmcu=$(MCU)
+	"$(.OBJCOPY)" -R .eeprom -O ihex "$(<[1])"  "$(<[2])"
+	"$(.OBJCOPY)" -j .eeprom --no-change-warnings --change-section-lma .eeprom=0 -O ihex "$(<[1])"  "$(<[3])"
+	"$(.SIZE)" --format=avr --mcu=$(MCU) "$(<[1])"
+}
+
